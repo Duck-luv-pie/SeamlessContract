@@ -13,7 +13,7 @@ app.use(express.json());
 require('dotenv').config();
 
 // =============================================================================
-// IN-MEMORY ESCROW SIMULATION
+// IN-MEMORY ESCROW SIMULATION WITH BALANCE TRACKING
 // =============================================================================
 
 // Deal status enum (mirrors the Solidity contract)
@@ -31,8 +31,24 @@ const StatusNames = ['NONE', 'CREATED', 'CONSUMER_FUNDED', 'STORE_FUNDED', 'RELE
 // In-memory storage for deals
 const deals = new Map();
 
+// In-memory storage for wallet balances (simulated token balances)
+// Key: wallet address (lowercase), Value: BigInt balance
+const walletBalances = new Map();
+
+// Escrow holding - tokens locked in escrow for each deal
+// Key: dealId, Value: { consumerAmount: BigInt, storeAmount: BigInt }
+const escrowHoldings = new Map();
+
 // Simulated block number (increments with each transaction)
 let blockNumber = 1000000;
+
+// Token decimals (USDC has 6 decimals)
+const TOKEN_DECIMALS = 6;
+const TOKEN_SYMBOL = 'USDC';
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
 
 // Generate a unique deal ID
 function generateDealId() {
@@ -57,6 +73,45 @@ function getNextBlock() {
 // Validate Ethereum address format
 function isValidAddress(address) {
   return /^0x[a-fA-F0-9]{40}$/.test(address);
+}
+
+// Get wallet balance (returns BigInt)
+function getBalance(walletAddress) {
+  const addr = walletAddress.toLowerCase();
+  return walletBalances.get(addr) || 0n;
+}
+
+// Set wallet balance
+function setBalance(walletAddress, amount) {
+  const addr = walletAddress.toLowerCase();
+  walletBalances.set(addr, BigInt(amount));
+}
+
+// Add to wallet balance
+function addBalance(walletAddress, amount) {
+  const addr = walletAddress.toLowerCase();
+  const current = getBalance(addr);
+  walletBalances.set(addr, current + BigInt(amount));
+}
+
+// Subtract from wallet balance (returns false if insufficient)
+function subtractBalance(walletAddress, amount) {
+  const addr = walletAddress.toLowerCase();
+  const current = getBalance(addr);
+  const amountBigInt = BigInt(amount);
+  if (current < amountBigInt) {
+    return false;
+  }
+  walletBalances.set(addr, current - amountBigInt);
+  return true;
+}
+
+// Format balance for display (with decimals)
+function formatBalance(amount) {
+  const amountStr = amount.toString().padStart(TOKEN_DECIMALS + 1, '0');
+  const intPart = amountStr.slice(0, -TOKEN_DECIMALS) || '0';
+  const decPart = amountStr.slice(-TOKEN_DECIMALS);
+  return `${intPart}.${decPart}`;
 }
 
 // =============================================================================
@@ -187,8 +242,136 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     service: 'Creator Escrow API',
     mode: 'simulation',
-    dealsCount: deals.size
+    dealsCount: deals.size,
+    walletsCount: walletBalances.size,
+    tokenSymbol: TOKEN_SYMBOL,
+    tokenDecimals: TOKEN_DECIMALS
   });
+});
+
+/**
+ * Mint tokens to a wallet (give starting balance)
+ */
+app.post('/api/mint', async (req, res) => {
+  try {
+    const { wallet, amount } = req.body;
+    
+    console.log('\n=== Mint Tokens Request ===');
+    console.log('Received:', { wallet, amount });
+    
+    if (!wallet || !amount) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: wallet, amount'
+      });
+    }
+    
+    if (!isValidAddress(wallet)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid wallet address'
+      });
+    }
+    
+    const amountBigInt = BigInt(amount);
+    if (amountBigInt <= 0n) {
+      return res.status(400).json({
+        success: false,
+        error: 'Amount must be greater than 0'
+      });
+    }
+    
+    const previousBalance = getBalance(wallet);
+    addBalance(wallet, amountBigInt);
+    const newBalance = getBalance(wallet);
+    
+    const txHash = generateTxHash();
+    const block = getNextBlock();
+    
+    console.log(`✅ Minted ${formatBalance(amountBigInt)} ${TOKEN_SYMBOL} to ${wallet}`);
+    
+    return res.json({
+      success: true,
+      message: `Minted ${formatBalance(amountBigInt)} ${TOKEN_SYMBOL} to wallet`,
+      simulated: true,
+      wallet: wallet.toLowerCase(),
+      amount: amount.toString(),
+      amountFormatted: formatBalance(amountBigInt),
+      previousBalance: previousBalance.toString(),
+      previousBalanceFormatted: formatBalance(previousBalance),
+      newBalance: newBalance.toString(),
+      newBalanceFormatted: formatBalance(newBalance),
+      transaction: {
+        txHash,
+        blockNumber: block
+      }
+    });
+    
+  } catch (error) {
+    console.error('Mint error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * Get wallet balance
+ */
+app.get('/api/balance/:wallet', async (req, res) => {
+  try {
+    const { wallet } = req.params;
+    
+    if (!isValidAddress(wallet)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid wallet address'
+      });
+    }
+    
+    const balance = getBalance(wallet);
+    
+    return res.json({
+      success: true,
+      simulated: true,
+      wallet: wallet.toLowerCase(),
+      balance: balance.toString(),
+      balanceFormatted: formatBalance(balance),
+      tokenSymbol: TOKEN_SYMBOL,
+      tokenDecimals: TOKEN_DECIMALS
+    });
+    
+  } catch (error) {
+    console.error('Get balance error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * Get all wallet balances
+ */
+app.get('/api/balances', async (req, res) => {
+  try {
+    const allBalances = [];
+    walletBalances.forEach((balance, wallet) => {
+      allBalances.push({
+        wallet,
+        balance: balance.toString(),
+        balanceFormatted: formatBalance(balance)
+      });
+    });
+    
+    return res.json({
+      success: true,
+      simulated: true,
+      count: allBalances.length,
+      tokenSymbol: TOKEN_SYMBOL,
+      tokenDecimals: TOKEN_DECIMALS,
+      balances: allBalances
+    });
+    
+  } catch (error) {
+    console.error('Get balances error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 /**
@@ -277,8 +460,15 @@ app.post('/api/create-escrow', async (req, res) => {
     
     deals.set(dealId, deal);
     
+    // Initialize escrow holdings for this deal
+    escrowHoldings.set(dealId, { consumerAmount: 0n, storeAmount: 0n });
+    
     console.log('✅ Deal created successfully!');
     console.log('Deal ID:', dealId);
+    
+    // Get current balances for info
+    const consumerBalance = getBalance(consumer_wallet);
+    const storeBalance = getBalance(store_wallet);
     
     return res.json({
       success: true,
@@ -300,12 +490,19 @@ app.post('/api/create-escrow', async (req, res) => {
       },
       escrowDetails: {
         price: price.toString(),
+        priceFormatted: formatBalance(BigInt(price)),
         commission: commission.toString(),
+        commissionFormatted: formatBalance(BigInt(commission)),
         consumer_wallet,
         store_wallet,
         influencer_wallet
       },
+      walletBalances: {
+        consumer: { address: consumer_wallet, balance: consumerBalance.toString(), balanceFormatted: formatBalance(consumerBalance) },
+        store: { address: store_wallet, balance: storeBalance.toString(), balanceFormatted: formatBalance(storeBalance) }
+      },
       nextSteps: {
+        mintTokens: `POST /api/mint with {"wallet": "${consumer_wallet}", "amount": "${price}"} to give consumer funds`,
         consumerFund: `POST /api/fund-consumer with {"dealId": "${dealId}", "consumer_wallet": "${consumer_wallet}"}`,
         storeFund: `POST /api/fund-store with {"dealId": "${dealId}", "store_wallet": "${store_wallet}"}`,
         checkStatus: `GET /api/deal-status/${dealId}`
@@ -382,6 +579,28 @@ app.post('/api/fund-consumer', async (req, res) => {
       });
     }
     
+    // Check consumer has enough balance
+    const priceAmount = BigInt(deal.price);
+    const consumerBalance = getBalance(consumer_wallet);
+    if (consumerBalance < priceAmount) {
+      return res.status(400).json({
+        success: false,
+        error: 'Insufficient balance. Consumer does not have enough tokens.',
+        required: deal.price,
+        requiredFormatted: formatBalance(priceAmount),
+        available: consumerBalance.toString(),
+        availableFormatted: formatBalance(consumerBalance),
+        shortfall: (priceAmount - consumerBalance).toString(),
+        shortfallFormatted: formatBalance(priceAmount - consumerBalance),
+        hint: `Use POST /api/mint to add tokens: {"wallet": "${consumer_wallet}", "amount": "${deal.price}"}`
+      });
+    }
+    
+    // Deduct from consumer balance and add to escrow
+    subtractBalance(consumer_wallet, priceAmount);
+    const escrow = escrowHoldings.get(dealId);
+    escrow.consumerAmount = priceAmount;
+    
     // Fund the consumer side
     const txHash = generateTxHash();
     const block = getNextBlock();
@@ -398,11 +617,29 @@ app.post('/api/fund-consumer', async (req, res) => {
       deal.status = Status.RELEASED;
       deal.releasedAt = new Date().toISOString();
       fulfilled = true;
+      
+      // Transfer funds from escrow to recipients
+      // Consumer's price goes to store
+      addBalance(deal.store, escrow.consumerAmount);
+      // Store's commission goes to influencer
+      addBalance(deal.influencer, escrow.storeAmount);
+      
+      // Clear escrow
+      escrow.consumerAmount = 0n;
+      escrow.storeAmount = 0n;
+      
       console.log('✅ Both sides funded - RELEASED!');
+      console.log(`   Store received: ${formatBalance(BigInt(deal.price))} ${TOKEN_SYMBOL}`);
+      console.log(`   Influencer received: ${formatBalance(BigInt(deal.commission))} ${TOKEN_SYMBOL}`);
     } else {
       deal.status = Status.CONSUMER_FUNDED;
       console.log('✅ Consumer funded. Waiting for store.');
     }
+    
+    // Get updated balances
+    const newConsumerBalance = getBalance(consumer_wallet);
+    const storeBalance = getBalance(deal.store);
+    const influencerBalance = getBalance(deal.influencer);
     
     return res.json({
       success: true,
@@ -414,7 +651,9 @@ app.post('/api/fund-consumer', async (req, res) => {
         consumerFunded: true,
         transactionHash: txHash,
         blockNumber: block,
-        gasUsed: gasUsed
+        gasUsed: gasUsed,
+        amountTransferred: deal.price,
+        amountTransferredFormatted: formatBalance(BigInt(deal.price))
       },
       dealStatus: {
         status: StatusNames[deal.status],
@@ -423,9 +662,20 @@ app.post('/api/fund-consumer', async (req, res) => {
         consumerFunded: deal.consumerFunded,
         storeFunded: deal.storeFunded
       },
+      balances: {
+        consumer: { address: deal.consumer, balance: newConsumerBalance.toString(), balanceFormatted: formatBalance(newConsumerBalance) },
+        store: { address: deal.store, balance: storeBalance.toString(), balanceFormatted: formatBalance(storeBalance) },
+        influencer: { address: deal.influencer, balance: influencerBalance.toString(), balanceFormatted: formatBalance(influencerBalance) }
+      },
+      escrowHolding: fulfilled ? null : {
+        consumerAmount: escrow.consumerAmount.toString(),
+        consumerAmountFormatted: formatBalance(escrow.consumerAmount),
+        storeAmount: escrow.storeAmount.toString(),
+        storeAmountFormatted: formatBalance(escrow.storeAmount)
+      },
       payouts: fulfilled ? {
-        store: { address: deal.store, amount: deal.price },
-        influencer: { address: deal.influencer, amount: deal.commission }
+        store: { address: deal.store, amount: deal.price, amountFormatted: formatBalance(BigInt(deal.price)) },
+        influencer: { address: deal.influencer, amount: deal.commission, amountFormatted: formatBalance(BigInt(deal.commission)) }
       } : null
     });
     
@@ -499,6 +749,28 @@ app.post('/api/fund-store', async (req, res) => {
       });
     }
     
+    // Check store has enough balance for commission
+    const commissionAmount = BigInt(deal.commission);
+    const storeBalance = getBalance(store_wallet);
+    if (storeBalance < commissionAmount) {
+      return res.status(400).json({
+        success: false,
+        error: 'Insufficient balance. Store does not have enough tokens for commission.',
+        required: deal.commission,
+        requiredFormatted: formatBalance(commissionAmount),
+        available: storeBalance.toString(),
+        availableFormatted: formatBalance(storeBalance),
+        shortfall: (commissionAmount - storeBalance).toString(),
+        shortfallFormatted: formatBalance(commissionAmount - storeBalance),
+        hint: `Use POST /api/mint to add tokens: {"wallet": "${store_wallet}", "amount": "${deal.commission}"}`
+      });
+    }
+    
+    // Deduct from store balance and add to escrow
+    subtractBalance(store_wallet, commissionAmount);
+    const escrow = escrowHoldings.get(dealId);
+    escrow.storeAmount = commissionAmount;
+    
     // Fund the store side
     const txHash = generateTxHash();
     const block = getNextBlock();
@@ -515,11 +787,29 @@ app.post('/api/fund-store', async (req, res) => {
       deal.status = Status.RELEASED;
       deal.releasedAt = new Date().toISOString();
       fulfilled = true;
+      
+      // Transfer funds from escrow to recipients
+      // Consumer's price goes to store
+      addBalance(deal.store, escrow.consumerAmount);
+      // Store's commission goes to influencer
+      addBalance(deal.influencer, escrow.storeAmount);
+      
+      // Clear escrow
+      escrow.consumerAmount = 0n;
+      escrow.storeAmount = 0n;
+      
       console.log('✅ Both sides funded - RELEASED!');
+      console.log(`   Store received: ${formatBalance(BigInt(deal.price))} ${TOKEN_SYMBOL}`);
+      console.log(`   Influencer received: ${formatBalance(BigInt(deal.commission))} ${TOKEN_SYMBOL}`);
     } else {
       deal.status = Status.STORE_FUNDED;
       console.log('✅ Store funded. Waiting for consumer.');
     }
+    
+    // Get updated balances
+    const consumerBalance = getBalance(deal.consumer);
+    const newStoreBalance = getBalance(deal.store);
+    const influencerBalance = getBalance(deal.influencer);
     
     return res.json({
       success: true,
@@ -531,7 +821,9 @@ app.post('/api/fund-store', async (req, res) => {
         storeFunded: true,
         transactionHash: txHash,
         blockNumber: block,
-        gasUsed: gasUsed
+        gasUsed: gasUsed,
+        amountTransferred: deal.commission,
+        amountTransferredFormatted: formatBalance(BigInt(deal.commission))
       },
       dealStatus: {
         status: StatusNames[deal.status],
@@ -540,9 +832,20 @@ app.post('/api/fund-store', async (req, res) => {
         consumerFunded: deal.consumerFunded,
         storeFunded: deal.storeFunded
       },
+      balances: {
+        consumer: { address: deal.consumer, balance: consumerBalance.toString(), balanceFormatted: formatBalance(consumerBalance) },
+        store: { address: deal.store, balance: newStoreBalance.toString(), balanceFormatted: formatBalance(newStoreBalance) },
+        influencer: { address: deal.influencer, balance: influencerBalance.toString(), balanceFormatted: formatBalance(influencerBalance) }
+      },
+      escrowHolding: fulfilled ? null : {
+        consumerAmount: escrow.consumerAmount.toString(),
+        consumerAmountFormatted: formatBalance(escrow.consumerAmount),
+        storeAmount: escrow.storeAmount.toString(),
+        storeAmountFormatted: formatBalance(escrow.storeAmount)
+      },
       payouts: fulfilled ? {
-        store: { address: deal.store, amount: deal.price },
-        influencer: { address: deal.influencer, amount: deal.commission }
+        store: { address: deal.store, amount: deal.price, amountFormatted: formatBalance(BigInt(deal.price)) },
+        influencer: { address: deal.influencer, amount: deal.commission, amountFormatted: formatBalance(BigInt(deal.commission)) }
       } : null
     });
     
@@ -572,6 +875,12 @@ app.get('/api/deal-status/:dealId', async (req, res) => {
     }
     
     const fulfilled = deal.status === Status.RELEASED;
+    const escrow = escrowHoldings.get(dealId);
+    
+    // Get current balances
+    const consumerBalance = getBalance(deal.consumer);
+    const storeBalance = getBalance(deal.store);
+    const influencerBalance = getBalance(deal.influencer);
     
     return res.json({
       success: true,
@@ -582,7 +891,9 @@ app.get('/api/deal-status/:dealId', async (req, res) => {
         store: deal.store,
         influencer: deal.influencer,
         price: deal.price,
-        commission: deal.commission
+        priceFormatted: formatBalance(BigInt(deal.price)),
+        commission: deal.commission,
+        commissionFormatted: formatBalance(BigInt(deal.commission))
       },
       status: {
         status: StatusNames[deal.status],
@@ -592,6 +903,17 @@ app.get('/api/deal-status/:dealId', async (req, res) => {
         storeFunded: deal.storeFunded,
         released: fulfilled
       },
+      balances: {
+        consumer: { address: deal.consumer, balance: consumerBalance.toString(), balanceFormatted: formatBalance(consumerBalance) },
+        store: { address: deal.store, balance: storeBalance.toString(), balanceFormatted: formatBalance(storeBalance) },
+        influencer: { address: deal.influencer, balance: influencerBalance.toString(), balanceFormatted: formatBalance(influencerBalance) }
+      },
+      escrowHolding: escrow ? {
+        consumerAmount: escrow.consumerAmount.toString(),
+        consumerAmountFormatted: formatBalance(escrow.consumerAmount),
+        storeAmount: escrow.storeAmount.toString(),
+        storeAmountFormatted: formatBalance(escrow.storeAmount)
+      } : null,
       timestamps: {
         createdAt: deal.createdAt,
         releasedAt: deal.releasedAt || null
@@ -602,8 +924,8 @@ app.get('/api/deal-status/:dealId', async (req, res) => {
         storeFunded: deal.storeFunded ? { txHash: deal.storeFundedTxHash, block: deal.storeFundedBlock } : null
       },
       payouts: fulfilled ? {
-        store: { address: deal.store, amount: deal.price },
-        influencer: { address: deal.influencer, amount: deal.commission }
+        store: { address: deal.store, amount: deal.price, amountFormatted: formatBalance(BigInt(deal.price)) },
+        influencer: { address: deal.influencer, amount: deal.commission, amountFormatted: formatBalance(BigInt(deal.commission)) }
       } : null
     });
     
@@ -619,9 +941,12 @@ app.get('/api/deal-status/:dealId', async (req, res) => {
 app.get('/api/contract-info', async (req, res) => {
   res.json({
     mode: 'simulation',
-    description: 'In-memory escrow simulation. Deals persist until server restart.',
+    description: 'In-memory escrow simulation with balance tracking. Deals and balances persist until server restart.',
     dealsCount: deals.size,
+    walletsCount: walletBalances.size,
     currentBlock: blockNumber,
+    tokenSymbol: TOKEN_SYMBOL,
+    tokenDecimals: TOKEN_DECIMALS,
     statusEnum: StatusNames
   });
 });
@@ -637,7 +962,9 @@ app.get('/api/deals', async (req, res) => {
     store: deal.store,
     influencer: deal.influencer,
     price: deal.price,
+    priceFormatted: formatBalance(BigInt(deal.price)),
     commission: deal.commission,
+    commissionFormatted: formatBalance(BigInt(deal.commission)),
     consumerFunded: deal.consumerFunded,
     storeFunded: deal.storeFunded,
     createdAt: deal.createdAt
@@ -656,9 +983,13 @@ app.get('/api/deals', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`🚀 API Server running on http://localhost:${PORT}`);
-  console.log(`\n📝 Mode: IN-MEMORY SIMULATION`);
-  console.log(`   Deals are stored in memory and will reset on server restart.\n`);
+  console.log(`\n📝 Mode: IN-MEMORY SIMULATION WITH BALANCE TRACKING`);
+  console.log(`   Token: ${TOKEN_SYMBOL} (${TOKEN_DECIMALS} decimals)`);
+  console.log(`   Deals and balances are stored in memory and will reset on server restart.\n`);
   console.log(`📝 Endpoints:`);
+  console.log(`   POST /api/mint             - Mint tokens to a wallet`);
+  console.log(`   GET  /api/balance/:wallet  - Get wallet balance`);
+  console.log(`   GET  /api/balances         - Get all wallet balances`);
   console.log(`   POST /api/create-escrow    - Create new escrow deal`);
   console.log(`   POST /api/fund-consumer    - Consumer pays price (consumer → store)`);
   console.log(`   POST /api/fund-store       - Store pays commission (store → influencer)`);
