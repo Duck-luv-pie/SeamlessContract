@@ -423,49 +423,90 @@ app.post('/api/create-escrow', async (req, res) => {
       });
     }
     
-    // Step 2: Create the deal on blockchain
-    console.log('Step 2: Creating deal on blockchain...');
-    const dealResult = await createDeal(
-      price,
-      commission,
-      consumer_wallet,
-      store_wallet,
-      influencer_wallet
-    );
+    // Step 2: Create the deal on blockchain (or simulate if not configured)
+    console.log('Step 2: Creating deal...');
     
-    if (!dealResult.success) {
-      const error = {
-        message: 'Failed to create deal on blockchain',
-        dealResult: dealResult
+    let dealResult;
+    const ESCROW_ADDRESS = process.env.ESCROW_ADDRESS;
+    
+    // Check if we're in simulation mode (no ESCROW_ADDRESS set)
+    if (!ESCROW_ADDRESS) {
+      console.log('⚠️  Simulation mode: No ESCROW_ADDRESS set, simulating contract creation...');
+      
+      // Generate mock/simulated contract data
+      const mockDealId = '0x' + Array.from({ length: 64 }, () => 
+        Math.floor(Math.random() * 16).toString(16)
+      ).join('');
+      const mockTxHash = '0x' + Array.from({ length: 64 }, () => 
+        Math.floor(Math.random() * 16).toString(16)
+      ).join('');
+      const mockBlockNumber = Math.floor(Math.random() * 1000000) + 1000000;
+      const mockGasUsed = Math.floor(Math.random() * 100000) + 50000;
+      
+      dealResult = {
+        success: true,
+        transactionHash: mockTxHash,
+        dealId: mockDealId,
+        receipt: {
+          blockNumber: mockBlockNumber,
+          gasUsed: mockGasUsed.toString()
+        },
+        simulated: true
       };
       
-      await logError({
-        endpoint: '/api/create-escrow',
-        request: req.body,
-        kairoAnalysis: kairoResult,
-        dealCreation: dealResult,
-        error: error
-      });
+      console.log('✅ Simulated deal created');
+      console.log('Deal ID (simulated):', mockDealId);
+      console.log('Transaction (simulated):', mockTxHash);
+    } else {
+      // Real blockchain interaction
+      dealResult = await createDeal(
+        price,
+        commission,
+        consumer_wallet,
+        store_wallet,
+        influencer_wallet
+      );
       
-      return res.status(500).json({
-        success: false,
-        error: error,
-        kairoResult: {
-          decision: kairoResult.decision,
-          status: 'PASSED'
-        },
-        dealResult: dealResult
-      });
+      if (!dealResult.success) {
+        const error = {
+          message: 'Failed to create deal on blockchain',
+          dealResult: dealResult
+        };
+        
+        await logError({
+          endpoint: '/api/create-escrow',
+          request: req.body,
+          kairoAnalysis: kairoResult,
+          dealCreation: dealResult,
+          error: error
+        });
+        
+        return res.status(500).json({
+          success: false,
+          error: error,
+          kairoResult: {
+            decision: kairoResult.decision,
+            status: 'PASSED'
+          },
+          dealResult: dealResult
+        });
+      }
     }
     
     // Step 3: Return success with contract info
     console.log('✅ Deal created successfully!');
+    if (dealResult.simulated) {
+      console.log('ℹ️  Running in simulation mode');
+    }
     console.log('Deal ID:', dealResult.dealId);
     console.log('Transaction:', dealResult.transactionHash);
     
     return res.json({
       success: true,
-      message: 'Escrow created successfully',
+      message: dealResult.simulated 
+        ? 'Escrow created successfully (simulated)' 
+        : 'Escrow created successfully',
+      simulated: dealResult.simulated || false,
       kairoAnalysis: {
         decision: kairoResult.decision,
         status: kairoResult.decision === 'ALLOW' ? 'PASSED' : 'WARN',
