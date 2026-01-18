@@ -273,18 +273,49 @@ async function createDeal(price, commission, consumerWallet, storeWallet, influe
     try {
       // Try multiple methods to parse the event
       
-      // Method 1: Parse using contract interface
+      // Method 1: Parse using contract interface - try different log formats
       if (receipt.logs && receipt.logs.length > 0) {
         for (const log of receipt.logs) {
           try {
-            const parsed = escrow.interface.parseLog(log);
+            // Try Hardhat format first (log.fragment.name)
+            if (log.fragment && log.fragment.name === "DealCreated" && log.args && log.args[0]) {
+              dealId = log.args[0];
+              break;
+            }
+            // Try parsing as-is (ethers v6 format)
+            let parsed = escrow.interface.parseLog(log);
             if (parsed && parsed.name === "DealCreated") {
               dealId = parsed.args[0];
               break;
             }
-          } catch (e) {
-            // Try next log
-            continue;
+          } catch (e1) {
+            // Try with explicit topics/data format
+            try {
+              const logData = {
+                topics: Array.isArray(log.topics) ? log.topics : [log.topics].filter(Boolean),
+                data: log.data || ''
+              };
+              const parsed = escrow.interface.parseLog(logData);
+              if (parsed && parsed.name === "DealCreated") {
+                dealId = parsed.args[0];
+                break;
+              }
+            } catch (e2) {
+              // Try extracting from topics directly (dealId is first indexed param, so topics[1])
+              if (log.topics && Array.isArray(log.topics) && log.topics.length > 1) {
+                try {
+                  const eventSignature = ethers.id("DealCreated(bytes32,address,address,address,uint256,uint256)");
+                  if (log.topics[0] === eventSignature || log.topics[0].toLowerCase() === eventSignature.toLowerCase()) {
+                    dealId = log.topics[1]; // First indexed parameter
+                    break;
+                  }
+                } catch (e3) {
+                  // Try next log
+                  continue;
+                }
+              }
+              continue;
+            }
           }
         }
       }
@@ -334,6 +365,28 @@ async function createDeal(price, commission, consumerWallet, storeWallet, influe
         console.warn('⚠️  Could not extract dealId from event. Transaction succeeded but dealId is null.');
         console.warn('Transaction hash:', tx.hash);
         console.warn('Block number:', receipt.blockNumber);
+        console.warn('Receipt logs count:', receipt.logs ? receipt.logs.length : 0);
+        if (receipt.logs && receipt.logs.length > 0) {
+          console.warn('First log:', JSON.stringify(receipt.logs[0], null, 2));
+        }
+        // Try one more time: query all DealCreated events from the block and match by tx hash
+        try {
+          const provider = isHardhat ? null : getProvider();
+          if (provider || isHardhat) {
+            const contractEscrow = isHardhat 
+              ? await ethers.getContractAt("CreatorCheckoutEscrow", ESCROW_ADDRESS)
+              : escrow;
+            const filter = contractEscrow.filters.DealCreated();
+            const events = await contractEscrow.queryFilter(filter, receipt.blockNumber, receipt.blockNumber);
+            const ourEvent = events.find(e => e.transactionHash === tx.hash || e.transaction.hash === tx.hash);
+            if (ourEvent && ourEvent.args && ourEvent.args[0]) {
+              dealId = ourEvent.args[0];
+              console.log('✅ Found dealId by querying filter:', dealId);
+            }
+          }
+        } catch (filterError) {
+          console.warn('Filter query also failed:', filterError.message);
+        }
       }
     } catch (eventError) {
       console.warn('Could not parse dealId from event:', eventError.message);
