@@ -10,6 +10,21 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(express.json());
 
+// CORS middleware - allow requests from Chrome extensions and web browsers
+app.use((req, res, next) => {
+  // Allow all origins (for Chrome extensions, they have chrome-extension:// origins)
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  
+  next();
+});
+
 // Load environment variables
 require('dotenv').config();
 
