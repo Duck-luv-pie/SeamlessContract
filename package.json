@@ -8,6 +8,7 @@
     "test": "hardhat test",
     "node": "hardhat node",
     "deploy": "hardhat run scripts/deploy.js",
+    "start": "node api/server.js",
     "api": "node api/server.js",
     "api:dev": "nodemon api/server.js"
   },
