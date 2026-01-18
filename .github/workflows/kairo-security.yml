@@ -1,0 +1,47 @@
+name: Kairo Security Check
+on: [pull_request]
+
+jobs:
+  kairo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Run Kairo Analyze (block on BLOCK/ESCALATE)
+        env:
+          KAIRO_API_KEY: ${{ secrets.KAIRO_API_KEY }}
+        run: |
+          set -e
+
+          FILE="contracts/CreatorCheckoutEscrow.sol"
+
+          RESPONSE=$(curl -s -X POST https://kairoaisec.com/api/v1/analyze \
+            -H "Authorization: Bearer $KAIRO_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"source\": {
+                \"type\": \"inline\",
+                \"files\": [{
+                  \"path\": \"$FILE\",
+                  \"content\": $(cat $FILE | jq -Rs .)
+                }]
+              },
+              \"config\": {
+                \"severity_threshold\": \"high\",
+                \"include_suggestions\": true
+              }
+            }")
+
+          echo "$RESPONSE" | jq .
+
+          DECISION=$(echo "$RESPONSE" | jq -r '.decision')
+          echo "Kairo decision: $DECISION"
+
+          if [ "$DECISION" = "BLOCK" ] || [ "$DECISION" = "ESCALATE" ]; then
+            echo "::error::Kairo security gate failed with decision $DECISION"
+            echo "$RESPONSE" | jq '.findings // .'
+            exit 1
+          fi

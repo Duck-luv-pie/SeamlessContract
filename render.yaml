@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: creator-escrow-api
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm run api
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      # Required environment variables (set these in Render dashboard):
+      # - KAIRO_API_KEY: Your Kairo API key
+      # - ESCROW_ADDRESS: Deployed contract address
+      # - RPC_URL: Blockchain RPC endpoint (Infura/Alchemy/public RPC)
+      # - PRIVATE_KEY: Wallet private key (if deploying new contracts, optional)
+    healthCheckPath: /health
