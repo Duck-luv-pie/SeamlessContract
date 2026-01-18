@@ -143,12 +143,6 @@ Every API request automatically:
 - **BLOCK** ❌ - Do not deploy, fix issues
 - **ESCALATE** 🚨 - Requires human review
 
-### Manual Analysis
-
-```bash
-./scripts/kairo-analyze.sh
-```
-
 ## Project Structure
 
 ```
@@ -160,7 +154,6 @@ Every API request automatically:
 │   └── escrow.test.js              # Test suite
 ├── scripts/
 │   ├── deploy.js                   # Deployment script
-│   ├── kairo-analyze.sh            # Kairo analysis script
 │   └── kairo-deploy-check.sh       # Pre-deployment check
 ├── api/
 │   └── server.js                   # REST API server
@@ -217,6 +210,45 @@ npm run api
 
 # Deploy
 npm run deploy
+```
+
+## Deployment
+
+### Render Deployment
+
+The project is configured for Render deployment with `render.yaml` and `Procfile`.
+
+**Required Environment Variables:**
+- `KAIRO_API_KEY` - Your Kairo API key
+- `ESCROW_ADDRESS` - Deployed contract address
+- `RPC_URL` - Blockchain RPC endpoint (Infura/Alchemy/public RPC)
+- `NODE_ENV=production`
+
+**Steps:**
+1. Deploy contracts to target network (save `ESCROW_ADDRESS`)
+2. Push to GitHub
+3. Connect repository to Render
+4. Set environment variables in Render dashboard
+5. Deploy - Render uses `Procfile` automatically
+
+The API automatically detects production mode and uses ethers.js Provider instead of Hardhat.
+
+### Network Configuration
+
+For mainnet/testnet deployment, update `hardhat.config.js`:
+
+```javascript
+networks: {
+  mainnet: {
+    url: process.env.MAINNET_RPC_URL,
+    accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+  },
+}
+```
+
+Then deploy:
+```bash
+npm run deploy --network mainnet
 ```
 
 ## License
