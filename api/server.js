@@ -1,11 +1,8 @@
 const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
-const { exec } = require('child_process');
-const { promisify } = require('util');
-
-const execAsync = promisify(exec);
 const crypto = require('crypto');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -15,66 +12,66 @@ app.use(express.json());
 // Load environment variables
 require('dotenv').config();
 
-// Initialize ethers.js - use ethers directly for production, Hardhat for development
-let ethers;
-let getContractAt;
-let isHardhat = false;
+// =============================================================================
+// IN-MEMORY ESCROW SIMULATION
+// =============================================================================
 
-try {
-  // Try to use Hardhat ethers (for development)
-  const hardhatEthers = require('hardhat').ethers;
-  ethers = hardhatEthers;
-  getContractAt = hardhatEthers.getContractAt.bind(hardhatEthers);
-  isHardhat = true;
-  console.log('✅ Using Hardhat ethers (development mode)');
-} catch (error) {
-  // Fall back to regular ethers.js (for production)
-  ethers = require('ethers');
-  console.log('✅ Using ethers.js Provider (production mode)');
+// Deal status enum (mirrors the Solidity contract)
+const Status = {
+  NONE: 0,
+  CREATED: 1,
+  CONSUMER_FUNDED: 2,
+  STORE_FUNDED: 3,
+  RELEASED: 4,
+  REFUNDED: 5
+};
+
+const StatusNames = ['NONE', 'CREATED', 'CONSUMER_FUNDED', 'STORE_FUNDED', 'RELEASED', 'REFUNDED'];
+
+// In-memory storage for deals
+const deals = new Map();
+
+// Simulated block number (increments with each transaction)
+let blockNumber = 1000000;
+
+// Generate a unique deal ID
+function generateDealId() {
+  return '0x' + crypto.randomBytes(32).toString('hex');
 }
 
-// Get provider based on environment
-function getProvider() {
-  if (isHardhat) {
-    // Hardhat provides provider automatically
-    return null; // Will use Hardhat's default provider
-  } else {
-    // Production: use RPC URL from environment
-    const RPC_URL = process.env.RPC_URL || process.env.ETH_RPC_URL;
-    if (!RPC_URL) {
-      throw new Error('RPC_URL or ETH_RPC_URL must be set in production environment');
-    }
-    return new ethers.JsonRpcProvider(RPC_URL);
-  }
+// Generate a fake transaction hash
+function generateTxHash() {
+  return '0x' + crypto.randomBytes(32).toString('hex');
 }
 
-// Get signer for transactions (if needed)
-function getSigner(provider) {
-  if (isHardhat) {
-    // Hardhat provides signer automatically via getContractAt
-    return null;
-  } else {
-    const PRIVATE_KEY = process.env.PRIVATE_KEY;
-    if (!PRIVATE_KEY) {
-      // For read-only operations, provider is enough
-      return null;
-    }
-    return new ethers.Wallet(PRIVATE_KEY, provider);
-  }
+// Generate fake gas used
+function generateGasUsed() {
+  return (Math.floor(Math.random() * 100000) + 50000).toString();
 }
 
-/**
- * Run Kairo analysis on the contract source code
- * Calls Kairo API directly (more reliable than shell script)
- */
+// Get next block number
+function getNextBlock() {
+  return ++blockNumber;
+}
+
+// Validate Ethereum address format
+function isValidAddress(address) {
+  return /^0x[a-fA-F0-9]{40}$/.test(address);
+}
+
+// =============================================================================
+// KAIRO SECURITY ANALYSIS
+// =============================================================================
+
 async function runKairoAnalysis() {
   try {
     const KAIRO_API_KEY = process.env.KAIRO_API_KEY;
     if (!KAIRO_API_KEY) {
       return {
         success: false,
-        decision: 'ERROR',
-        error: 'KAIRO_API_KEY not set in environment'
+        decision: 'WARN',
+        error: 'KAIRO_API_KEY not set in environment',
+        errorType: 'not_configured'
       };
     }
 
@@ -82,9 +79,8 @@ async function runKairoAnalysis() {
     const contractPath = path.join(__dirname, '../contracts/CreatorCheckoutEscrow.sol');
     const contractContent = await fs.readFile(contractPath, 'utf-8');
 
-    // Call Kairo API directly
+    // Call Kairo API
     const https = require('https');
-    const { promisify } = require('util');
     
     const postData = JSON.stringify({
       source: {
@@ -112,20 +108,14 @@ async function runKairoAnalysis() {
       }
     };
 
-    // Make the API call
     const response = await new Promise((resolve, reject) => {
       const req = https.request(options, (res) => {
         let data = '';
-        
-        res.on('data', (chunk) => {
-          data += chunk;
-        });
-        
+        res.on('data', (chunk) => { data += chunk; });
         res.on('end', () => {
           if (res.statusCode === 200) {
             try {
-              const jsonData = JSON.parse(data);
-              resolve(jsonData);
+              resolve(JSON.parse(data));
             } catch (parseError) {
               reject(new Error(`Failed to parse Kairo response: ${parseError.message}`));
             }
@@ -143,34 +133,30 @@ async function runKairoAnalysis() {
       req.end();
     });
 
-    // Extract decision from response (per Kairo docs)
-    const decision = response.decision || 'UNKNOWN';
-    
     return {
       success: true,
-      decision: decision,
+      decision: response.decision || 'UNKNOWN',
       response: response,
       decision_reason: response.decision_reason || null,
       risk_score: response.risk_score || null,
-      summary: response.summary || null,
       findings: response.findings || []
     };
     
   } catch (error) {
-    // Network or API error
     console.error('Kairo analysis error:', error.message);
     return {
       success: false,
-      decision: 'ERROR',
+      decision: 'WARN',
       error: error.message,
-      response: null
+      errorType: error.message.includes('403') ? 'rate_limited' : 'api_error'
     };
   }
 }
 
-/**
- * Log error to errors file
- */
+// =============================================================================
+// ERROR LOGGING
+// =============================================================================
+
 async function logError(errorData) {
   const errorLog = {
     timestamp: new Date().toISOString(),
@@ -188,230 +174,25 @@ async function logError(errorData) {
   }
 }
 
-/**
- * Generate simulated escrow data (fallback when real contract unavailable)
- */
-function generateSimulatedDeal(price, commission, consumerWallet, storeWallet, influencerWallet) {
-  const dealId = '0x' + crypto.randomBytes(32).toString('hex');
-  const txHash = '0x' + crypto.randomBytes(32).toString('hex');
-  const blockNumber = Math.floor(Math.random() * 10000000) + 1000000;
-  const gasUsed = Math.floor(Math.random() * 100000) + 50000;
-  
-  return {
-    dealId,
-    transactionHash: txHash,
-    blockNumber,
-    gasUsed: gasUsed.toString()
-  };
-}
+// =============================================================================
+// API ENDPOINTS
+// =============================================================================
 
 /**
- * Create deal on the smart contract
+ * Health check endpoint
  */
-async function createDeal(price, commission, consumerWallet, storeWallet, influencerWallet) {
-  try {
-    // Get contract address from environment
-    const ESCROW_ADDRESS = process.env.ESCROW_ADDRESS;
-    if (!ESCROW_ADDRESS) {
-      throw new Error('ESCROW_ADDRESS not set in environment. Deploy contract first.');
-    }
-    
-    // Get contract instance based on environment
-    let escrow;
-    if (isHardhat) {
-      // Development: use Hardhat's getContractAt
-      escrow = await ethers.getContractAt("CreatorCheckoutEscrow", ESCROW_ADDRESS);
-    } else {
-      // Production: use ethers.js with ABI from artifacts
-      const provider = getProvider();
-      const signer = getSigner(provider);
-      
-      // Load ABI from artifacts (deployed contracts)
-      const artifactsPath = path.join(__dirname, '../artifacts/contracts/CreatorCheckoutEscrow.sol/CreatorCheckoutEscrow.json');
-      const artifacts = JSON.parse(await fs.readFile(artifactsPath, 'utf-8'));
-      const abi = artifacts.abi;
-      
-      escrow = new ethers.Contract(ESCROW_ADDRESS, abi, signer || provider);
-    }
-    
-    // Convert to BigInt (handle both string and number inputs)
-    let priceBigInt, commissionBigInt;
-    
-    if (typeof price === 'string') {
-      // If string, assume it's already in wei/base units
-      priceBigInt = BigInt(price);
-    } else {
-      // If number, convert to BigInt
-      priceBigInt = BigInt(price);
-    }
-    
-    if (typeof commission === 'string') {
-      commissionBigInt = BigInt(commission);
-    } else {
-      commissionBigInt = BigInt(commission);
-    }
-    
-    // Validate addresses
-    if (!ethers.isAddress(consumerWallet) || !ethers.isAddress(storeWallet) || !ethers.isAddress(influencerWallet)) {
-      throw new Error('Invalid wallet addresses');
-    }
-    
-    // Create the deal
-    const tx = await escrow.createDeal(
-      consumerWallet,
-      storeWallet,
-      influencerWallet,
-      priceBigInt,
-      commissionBigInt
-    );
-    
-    // Wait for confirmation
-    const receipt = await tx.wait();
-    
-    // Get dealId from event
-    let dealId = null;
-    try {
-      // Try multiple methods to parse the event
-      
-      // Method 1: Parse using contract interface - try different log formats
-      if (receipt.logs && receipt.logs.length > 0) {
-        for (const log of receipt.logs) {
-          try {
-            // Try Hardhat format first (log.fragment.name)
-            if (log.fragment && log.fragment.name === "DealCreated" && log.args && log.args[0]) {
-              dealId = log.args[0];
-              break;
-            }
-            // Try parsing as-is (ethers v6 format)
-            let parsed = escrow.interface.parseLog(log);
-            if (parsed && parsed.name === "DealCreated") {
-              dealId = parsed.args[0];
-              break;
-            }
-          } catch (e1) {
-            // Try with explicit topics/data format
-            try {
-              const logData = {
-                topics: Array.isArray(log.topics) ? log.topics : [log.topics].filter(Boolean),
-                data: log.data || ''
-              };
-              const parsed = escrow.interface.parseLog(logData);
-              if (parsed && parsed.name === "DealCreated") {
-                dealId = parsed.args[0];
-                break;
-              }
-            } catch (e2) {
-              // Try extracting from topics directly (dealId is first indexed param, so topics[1])
-              if (log.topics && Array.isArray(log.topics) && log.topics.length > 1) {
-                try {
-                  const eventSignature = ethers.id("DealCreated(bytes32,address,address,address,uint256,uint256)");
-                  if (log.topics[0] === eventSignature || log.topics[0].toLowerCase() === eventSignature.toLowerCase()) {
-                    dealId = log.topics[1]; // First indexed parameter
-                    break;
-                  }
-                } catch (e3) {
-                  // Try next log
-                  continue;
-                }
-              }
-              continue;
-            }
-          }
-        }
-      }
-      
-      // Method 2: If still null, try to get it from the transaction response
-      // by querying events from the transaction
-      if (!dealId && tx.hash) {
-        try {
-          const filter = escrow.filters.DealCreated();
-          const events = await escrow.queryFilter(filter, receipt.blockNumber, receipt.blockNumber);
-          if (events.length > 0) {
-            // Find the event from our transaction
-            const ourEvent = events.find(e => e.transactionHash === tx.hash);
-            if (ourEvent && ourEvent.args && ourEvent.args[0]) {
-              dealId = ourEvent.args[0];
-            }
-          }
-        } catch (e) {
-          console.warn('Could not query events:', e.message);
-        }
-      }
-      
-      // Method 3: If still null, try parsing receipt logs with ethers v6 format
-      if (!dealId && receipt.logs) {
-        try {
-          // In ethers v6, receipt.logs might be different format
-          const parsedLogs = receipt.logs.map(log => {
-            try {
-              return escrow.interface.parseLog({
-                topics: log.topics || [],
-                data: log.data || ''
-              });
-            } catch {
-              return null;
-            }
-          }).filter(log => log !== null && log.name === "DealCreated");
-          
-          if (parsedLogs.length > 0) {
-            dealId = parsedLogs[0].args[0];
-          }
-        } catch (e) {
-          console.warn('Could not parse logs in v6 format:', e.message);
-        }
-      }
-      
-      if (!dealId) {
-        console.warn('⚠️  Could not extract dealId from event. Transaction succeeded but dealId is null.');
-        console.warn('Transaction hash:', tx.hash);
-        console.warn('Block number:', receipt.blockNumber);
-        console.warn('Receipt logs count:', receipt.logs ? receipt.logs.length : 0);
-        if (receipt.logs && receipt.logs.length > 0) {
-          console.warn('First log:', JSON.stringify(receipt.logs[0], null, 2));
-        }
-        // Try one more time: query all DealCreated events from the block and match by tx hash
-        try {
-          const provider = isHardhat ? null : getProvider();
-          if (provider || isHardhat) {
-            const contractEscrow = isHardhat 
-              ? await ethers.getContractAt("CreatorCheckoutEscrow", ESCROW_ADDRESS)
-              : escrow;
-            const filter = contractEscrow.filters.DealCreated();
-            const events = await contractEscrow.queryFilter(filter, receipt.blockNumber, receipt.blockNumber);
-            const ourEvent = events.find(e => e.transactionHash === tx.hash || e.transaction.hash === tx.hash);
-            if (ourEvent && ourEvent.args && ourEvent.args[0]) {
-              dealId = ourEvent.args[0];
-              console.log('✅ Found dealId by querying filter:', dealId);
-            }
-          }
-        } catch (filterError) {
-          console.warn('Filter query also failed:', filterError.message);
-        }
-      }
-    } catch (eventError) {
-      console.warn('Could not parse dealId from event:', eventError.message);
-    }
-    
-    return {
-      success: true,
-      transactionHash: tx.hash,
-      dealId: dealId,
-      receipt: {
-        blockNumber: receipt.blockNumber,
-        gasUsed: receipt.gasUsed.toString()
-      }
-    };
-  } catch (error) {
-    return {
-      success: false,
-      error: error.message,
-      stack: error.stack
-    };
-  }
-}
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    service: 'Creator Escrow API',
+    mode: 'simulation',
+    dealsCount: deals.size
+  });
+});
 
 /**
- * Main API endpoint
+ * Create a new escrow deal
  */
 app.post('/api/create-escrow', async (req, res) => {
   try {
@@ -423,14 +204,8 @@ app.post('/api/create-escrow', async (req, res) => {
       influencer_wallet 
     } = req.body;
     
-    console.log('\n=== New Request ===');
-    console.log('Received:', {
-      price,
-      commission,
-      store_wallet,
-      consumer_wallet,
-      influencer_wallet
-    });
+    console.log('\n=== New Create Escrow Request ===');
+    console.log('Received:', { price, commission, store_wallet, consumer_wallet, influencer_wallet });
     
     // Validate input
     if (!price || !commission || !store_wallet || !consumer_wallet || !influencer_wallet) {
@@ -439,192 +214,89 @@ app.post('/api/create-escrow', async (req, res) => {
         required: ['price', 'commission', 'store_wallet', 'consumer_wallet', 'influencer_wallet'],
         received: Object.keys(req.body)
       };
-      
-      await logError({
-        endpoint: '/api/create-escrow',
-        request: req.body,
-        error: error
-      });
-      
-      return res.status(400).json({
-        success: false,
-        error: error
-      });
+      await logError({ endpoint: '/api/create-escrow', request: req.body, error });
+      return res.status(400).json({ success: false, error });
     }
     
     // Validate addresses
-    if (!ethers.isAddress(store_wallet) || !ethers.isAddress(consumer_wallet) || !ethers.isAddress(influencer_wallet)) {
+    if (!isValidAddress(store_wallet) || !isValidAddress(consumer_wallet) || !isValidAddress(influencer_wallet)) {
       const error = {
-        message: 'Invalid wallet addresses',
-        addresses: {
-          store_wallet,
-          consumer_wallet,
-          influencer_wallet
-        }
+        message: 'Invalid wallet addresses. Must be valid Ethereum addresses (0x followed by 40 hex characters)',
+        addresses: { store_wallet, consumer_wallet, influencer_wallet }
       };
-      
-      await logError({
-        endpoint: '/api/create-escrow',
-        request: req.body,
-        error: error
-      });
-      
-      return res.status(400).json({
-        success: false,
-        error: error
-      });
+      await logError({ endpoint: '/api/create-escrow', request: req.body, error });
+      return res.status(400).json({ success: false, error });
     }
     
-    // Step 1: Run Kairo analysis
+    // Validate amounts
+    const priceNum = BigInt(price);
+    const commissionNum = BigInt(commission);
+    if (priceNum <= 0n || commissionNum <= 0n) {
+      const error = { message: 'Price and commission must be greater than 0' };
+      await logError({ endpoint: '/api/create-escrow', request: req.body, error });
+      return res.status(400).json({ success: false, error });
+    }
+    
+    // Run Kairo analysis (optional, continues on failure)
     console.log('Step 1: Running Kairo analysis...');
     const kairoResult = await runKairoAnalysis();
-    
-    // Handle Kairo analysis results
-    let kairoBuffering = false;
-    
-    if (!kairoResult.success) {
-      // Check if it's a 403 error (rate limited/IP blocked)
-      const is403Error = kairoResult.error && kairoResult.error.includes('403');
-      
-      // Check if it's a network/API error (403, network issues, etc.)
-      const isNetworkError = kairoResult.error && (
-        kairoResult.error.includes('ENOTFOUND') ||
-        kairoResult.error.includes('getaddrinfo') ||
-        kairoResult.error.includes('Network') ||
-        kairoResult.error.includes('ECONNREFUSED') ||
-        kairoResult.error.includes('403') ||
-        kairoResult.error.includes('CloudFront') ||
-        kairoResult.error.includes('ECONNRESET')
-      );
-      
-      // If 403, set buffering flag and ignore the error
-      if (is403Error) {
-        kairoBuffering = true;
-        console.warn('⚠️  Kairo API returned 403 (rate limited/IP blocked) - KairoAPI_buffering: True, ignoring and continuing');
-        kairoResult.decision = 'WARN';
-        kairoResult.errorType = 'rate_limited';
-        kairoResult.decision_reason = 'Kairo API returned 403 - likely rate limited or IP blocked by CloudFront';
-      } else if (isNetworkError) {
-        // Other network errors - allow proceeding with warning
-        console.warn('⚠️  Kairo API unavailable (network error), proceeding with warning');
-        kairoResult.decision = 'WARN';
-        
-        // Determine specific error type
-        let errorType = 'unknown';
-        let errorReason = '';
-        if (kairoResult.error?.includes('401')) {
-          errorType = 'unauthorized';
-          errorReason = 'Kairo API returned 401 - API key may be invalid';
-        } else if (kairoResult.error?.includes('ENOTFOUND') || kairoResult.error?.includes('getaddrinfo')) {
-          errorType = 'network_error';
-          errorReason = 'Cannot resolve Kairo API hostname - DNS/network issue';
-        } else if (kairoResult.error?.includes('ECONNREFUSED') || kairoResult.error?.includes('ECONNRESET')) {
-          errorType = 'connection_refused';
-          errorReason = 'Connection to Kairo API refused - service may be down';
-        } else if (kairoResult.error?.includes('timeout')) {
-          errorType = 'timeout';
-          errorReason = 'Request to Kairo API timed out';
-        } else {
-          errorType = 'api_error';
-          errorReason = kairoResult.error || 'Kairo API error - proceeding with warning';
-        }
-        
-        kairoResult.errorType = errorType;
-        kairoResult.decision_reason = errorReason;
-      } else {
-        // Non-network errors - log but allow proceeding (Kairo might have other issues)
-        console.warn('⚠️  Kairo analysis had issues, proceeding with warning:', kairoResult.error);
-        kairoResult.decision = 'WARN';
-        kairoResult.errorType = 'api_error';
-        kairoResult.decision_reason = kairoResult.error || 'Kairo API error';
-      }
-    }
-    
     console.log('Kairo decision:', kairoResult.decision);
     
-    // Check if Kairo blocks the deployment
+    // Block if Kairo says BLOCK or ESCALATE
     if (kairoResult.decision === 'BLOCK' || kairoResult.decision === 'ESCALATE') {
       const error = {
         message: 'Kairo security check failed - contract is not safe to deploy',
         kairoDecision: kairoResult.decision,
-        kairoResult: kairoResult.response
+        findings: kairoResult.findings || []
       };
-      
-      await logError({
-        endpoint: '/api/create-escrow',
-        request: req.body,
-        kairoAnalysis: kairoResult,
-        error: error
-      });
-      
-      return res.status(400).json({
-        success: false,
-        error: error,
-        kairoResult: {
-          decision: kairoResult.decision,
-          findings: kairoResult.response?.findings || []
-        }
-      });
+      await logError({ endpoint: '/api/create-escrow', request: req.body, kairoAnalysis: kairoResult, error });
+      return res.status(400).json({ success: false, error, kairoResult: { decision: kairoResult.decision, findings: kairoResult.findings || [] } });
     }
     
-    // Step 2: Create the deal on blockchain
-    console.log('Step 2: Creating deal...');
+    // Create the deal
+    console.log('Step 2: Creating deal in simulation...');
+    const dealId = generateDealId();
+    const txHash = generateTxHash();
+    const block = getNextBlock();
+    const gasUsed = generateGasUsed();
     
-    const ESCROW_ADDRESS = process.env.ESCROW_ADDRESS;
-    let dealResult;
-    let simulated = false;
+    const deal = {
+      dealId,
+      consumer: consumer_wallet.toLowerCase(),
+      store: store_wallet.toLowerCase(),
+      influencer: influencer_wallet.toLowerCase(),
+      price: price.toString(),
+      commission: commission.toString(),
+      status: Status.CREATED,
+      consumerFunded: false,
+      storeFunded: false,
+      createdAt: new Date().toISOString(),
+      createdTxHash: txHash,
+      createdBlock: block
+    };
     
-    // Try real blockchain interaction
-    if (ESCROW_ADDRESS) {
-      dealResult = await createDeal(
-        price,
-        commission,
-        consumer_wallet,
-        store_wallet,
-        influencer_wallet
-      );
-      
-      // If real deal creation failed, fall back to simulation
-      if (!dealResult.success) {
-        console.warn('⚠️  Real escrow creation failed, falling back to simulation:', dealResult.error);
-        dealResult = generateSimulatedDeal(price, commission, consumer_wallet, store_wallet, influencer_wallet);
-        dealResult.success = true;
-        simulated = true;
-      }
-    } else {
-      // ESCROW_ADDRESS not set, use simulation
-      console.warn('⚠️  ESCROW_ADDRESS not set, using simulated escrow');
-      dealResult = generateSimulatedDeal(price, commission, consumer_wallet, store_wallet, influencer_wallet);
-      dealResult.success = true;
-      simulated = true;
-    }
+    deals.set(dealId, deal);
     
-    // Step 3: Return success with contract info
-    console.log('✅ Deal created successfully!', simulated ? '(simulated)' : '(on blockchain)');
-    console.log('Deal ID:', dealResult.dealId);
-    console.log('Transaction:', dealResult.transactionHash);
+    console.log('✅ Deal created successfully!');
+    console.log('Deal ID:', dealId);
     
     return res.json({
       success: true,
-      message: simulated 
-        ? 'Escrow created successfully (simulated)' 
-        : 'Escrow created successfully on blockchain',
-      simulated: simulated,
-      KairoAPI_buffering: kairoBuffering || false,
+      message: 'Escrow created successfully (simulation)',
+      simulated: true,
       kairoAnalysis: {
         decision: kairoResult.decision,
-        status: kairoResult.decision === 'ALLOW' ? 'PASSED' : 'WARN',
+        status: kairoResult.success ? 'PASSED' : 'WARN',
         errorType: kairoResult.errorType || null,
-        errorReason: kairoResult.decision_reason || null,
-        findings: kairoResult.response?.findings || [],
+        findings: kairoResult.findings || [],
         available: kairoResult.success
       },
       contract: {
-        address: ESCROW_ADDRESS || 'SIMULATED',
-        dealId: dealResult.dealId,
-        transactionHash: dealResult.transactionHash,
-        blockNumber: dealResult.blockNumber || dealResult.receipt?.blockNumber,
-        gasUsed: dealResult.gasUsed || dealResult.receipt?.gasUsed
+        address: 'SIMULATED',
+        dealId: dealId,
+        transactionHash: txHash,
+        blockNumber: block,
+        gasUsed: gasUsed
       },
       escrowDetails: {
         price: price.toString(),
@@ -634,74 +306,18 @@ app.post('/api/create-escrow', async (req, res) => {
         influencer_wallet
       },
       nextSteps: {
-        consumerFund: `POST /api/fund-consumer with {"dealId": "${dealResult.dealId}", "consumer_wallet": "${consumer_wallet}"}`,
-        storeFund: `POST /api/fund-store with {"dealId": "${dealResult.dealId}", "store_wallet": "${store_wallet}"}`,
-        checkStatus: `GET /api/deal-status/${dealResult.dealId}`
+        consumerFund: `POST /api/fund-consumer with {"dealId": "${dealId}", "consumer_wallet": "${consumer_wallet}"}`,
+        storeFund: `POST /api/fund-store with {"dealId": "${dealId}", "store_wallet": "${store_wallet}"}`,
+        checkStatus: `GET /api/deal-status/${dealId}`
       }
     });
     
   } catch (error) {
     console.error('Unexpected error:', error);
-    
-    await logError({
-      endpoint: '/api/create-escrow',
-      request: req.body,
-      unexpectedError: {
-        message: error.message,
-        stack: error.stack
-      }
-    });
-    
-    return res.status(500).json({
-      success: false,
-      error: {
-        message: 'Internal server error',
-        details: error.message
-      }
-    });
+    await logError({ endpoint: '/api/create-escrow', request: req.body, unexpectedError: { message: error.message, stack: error.stack } });
+    return res.status(500).json({ success: false, error: { message: 'Internal server error', details: error.message } });
   }
 });
-
-/**
- * Health check endpoint
- */
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    service: 'Creator Escrow API'
-  });
-});
-
-/**
- * Get escrow contract instance
- */
-async function getEscrowContract(walletAddress = null) {
-  const ESCROW_ADDRESS = process.env.ESCROW_ADDRESS;
-  if (!ESCROW_ADDRESS) {
-    throw new Error('ESCROW_ADDRESS not set in environment. Deploy contract first.');
-  }
-  
-  if (isHardhat) {
-    return await ethers.getContractAt("CreatorCheckoutEscrow", ESCROW_ADDRESS);
-  } else {
-    const provider = getProvider();
-    let signer = getSigner(provider);
-    
-    // If walletAddress provided, use that wallet's signer instead
-    if (walletAddress) {
-      const PRIVATE_KEY = process.env[`PRIVATE_KEY_${walletAddress.toLowerCase()}`] || process.env.PRIVATE_KEY;
-      if (PRIVATE_KEY) {
-        signer = new ethers.Wallet(PRIVATE_KEY, provider);
-      }
-    }
-    
-    const artifactsPath = path.join(__dirname, '../artifacts/contracts/CreatorCheckoutEscrow.sol/CreatorCheckoutEscrow.json');
-    const artifacts = JSON.parse(await fs.readFile(artifactsPath, 'utf-8'));
-    const abi = artifacts.abi;
-    return new ethers.Contract(ESCROW_ADDRESS, abi, signer || provider);
-  }
-}
 
 /**
  * Fund consumer (consumer pays price to store)
@@ -710,6 +326,9 @@ app.post('/api/fund-consumer', async (req, res) => {
   try {
     const { dealId, consumer_wallet } = req.body;
     
+    console.log('\n=== Fund Consumer Request ===');
+    console.log('Received:', { dealId, consumer_wallet });
+    
     if (!dealId || !consumer_wallet) {
       return res.status(400).json({
         success: false,
@@ -717,99 +336,103 @@ app.post('/api/fund-consumer', async (req, res) => {
       });
     }
     
-    if (!ethers.isAddress(consumer_wallet)) {
+    if (!isValidAddress(consumer_wallet)) {
       return res.status(400).json({
         success: false,
         error: 'Invalid consumer_wallet address'
       });
     }
     
-    const ESCROW_ADDRESS = process.env.ESCROW_ADDRESS;
-    let simulated = false;
-    
-    // Try real blockchain interaction
-    if (ESCROW_ADDRESS) {
-      try {
-        // Get contract with consumer wallet signer
-        const escrow = await getEscrowContract(consumer_wallet);
-        
-        // Call fundConsumer on the contract
-        const tx = await escrow.fundConsumer(dealId);
-        const receipt = await tx.wait();
-        
-        // Get updated deal status
-        const dealInfo = await escrow.getDeal(dealId);
-        const status = dealInfo[5]; // Status is 6th return value (index 5)
-        
-        // Status enum: NONE(0), CREATED(1), CONSUMER_FUNDED(2), STORE_FUNDED(3), RELEASED(4), REFUNDED(5)
-        const statusNames = ['NONE', 'CREATED', 'CONSUMER_FUNDED', 'STORE_FUNDED', 'RELEASED', 'REFUNDED'];
-        const statusName = statusNames[status] || 'UNKNOWN';
-        const fulfilled = status === 4; // RELEASED = 4
-        
-        return res.json({
-          success: true,
-          message: fulfilled 
-            ? 'Consumer funded and escrow fulfilled! Funds have been released.'
-            : 'Consumer funded successfully. Waiting for store to fund.',
-          confirmation: {
-            consumerFunded: true,
-            transactionHash: tx.hash,
-            blockNumber: receipt.blockNumber,
-            gasUsed: receipt.gasUsed.toString()
-          },
-          dealStatus: {
-            status: statusName,
-            statusCode: status,
-            fulfilled: fulfilled
-          }
-        });
-      } catch (error) {
-        console.warn('⚠️  Real funding failed, falling back to simulation:', error.message);
-        simulated = true;
-      }
-    } else {
-      console.warn('⚠️  ESCROW_ADDRESS not set, using simulated funding');
-      simulated = true;
+    // Get the deal
+    const deal = deals.get(dealId);
+    if (!deal) {
+      return res.status(404).json({
+        success: false,
+        error: 'Deal not found. Make sure the dealId is correct.'
+      });
     }
     
-    // Fallback to simulation
-    const txHash = '0x' + crypto.randomBytes(32).toString('hex');
-    const blockNumber = Math.floor(Math.random() * 10000000) + 1000000;
-    const gasUsed = Math.floor(Math.random() * 100000) + 50000;
+    // Verify the caller is the consumer
+    if (deal.consumer !== consumer_wallet.toLowerCase()) {
+      return res.status(403).json({
+        success: false,
+        error: 'Unauthorized. Only the consumer can fund this side of the deal.'
+      });
+    }
+    
+    // Check deal status
+    if (deal.status === Status.RELEASED) {
+      return res.status(400).json({
+        success: false,
+        error: 'Deal already released. Cannot fund.'
+      });
+    }
+    
+    if (deal.status === Status.REFUNDED) {
+      return res.status(400).json({
+        success: false,
+        error: 'Deal was refunded. Cannot fund.'
+      });
+    }
+    
+    if (deal.consumerFunded) {
+      return res.status(400).json({
+        success: false,
+        error: 'Consumer has already funded this deal.'
+      });
+    }
+    
+    // Fund the consumer side
+    const txHash = generateTxHash();
+    const block = getNextBlock();
+    const gasUsed = generateGasUsed();
+    
+    deal.consumerFunded = true;
+    deal.consumerFundedTxHash = txHash;
+    deal.consumerFundedBlock = block;
+    
+    // Check if both sides are now funded
+    let fulfilled = false;
+    if (deal.storeFunded) {
+      // Both funded - release!
+      deal.status = Status.RELEASED;
+      deal.releasedAt = new Date().toISOString();
+      fulfilled = true;
+      console.log('✅ Both sides funded - RELEASED!');
+    } else {
+      deal.status = Status.CONSUMER_FUNDED;
+      console.log('✅ Consumer funded. Waiting for store.');
+    }
     
     return res.json({
       success: true,
-      message: 'Consumer funded successfully (simulated). Waiting for store to fund.',
+      message: fulfilled 
+        ? 'Consumer funded and escrow fulfilled! Funds have been released.'
+        : 'Consumer funded successfully. Waiting for store to fund.',
       simulated: true,
       confirmation: {
         consumerFunded: true,
         transactionHash: txHash,
-        blockNumber: blockNumber,
-        gasUsed: gasUsed.toString()
+        blockNumber: block,
+        gasUsed: gasUsed
       },
       dealStatus: {
-        status: 'CONSUMER_FUNDED',
-        statusCode: 2,
-        fulfilled: false
-      }
+        status: StatusNames[deal.status],
+        statusCode: deal.status,
+        fulfilled: fulfilled,
+        consumerFunded: deal.consumerFunded,
+        storeFunded: deal.storeFunded
+      },
+      payouts: fulfilled ? {
+        store: { address: deal.store, amount: deal.price },
+        influencer: { address: deal.influencer, amount: deal.commission }
+      } : null
     });
     
   } catch (error) {
     console.error('Fund consumer error:', error);
-    
-    await logError({
-      endpoint: '/api/fund-consumer',
-      request: req.body,
-      error: {
-        message: error.message,
-        stack: error.stack
-      }
-    });
-    
-    return res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    await logError({ endpoint: '/api/fund-consumer', request: req.body, error: { message: error.message, stack: error.stack } });
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -820,6 +443,9 @@ app.post('/api/fund-store', async (req, res) => {
   try {
     const { dealId, store_wallet } = req.body;
     
+    console.log('\n=== Fund Store Request ===');
+    console.log('Received:', { dealId, store_wallet });
+    
     if (!dealId || !store_wallet) {
       return res.status(400).json({
         success: false,
@@ -827,99 +453,103 @@ app.post('/api/fund-store', async (req, res) => {
       });
     }
     
-    if (!ethers.isAddress(store_wallet)) {
+    if (!isValidAddress(store_wallet)) {
       return res.status(400).json({
         success: false,
         error: 'Invalid store_wallet address'
       });
     }
     
-    const ESCROW_ADDRESS = process.env.ESCROW_ADDRESS;
-    let simulated = false;
-    
-    // Try real blockchain interaction
-    if (ESCROW_ADDRESS) {
-      try {
-        // Get contract with store wallet signer
-        const escrow = await getEscrowContract(store_wallet);
-        
-        // Call fundStore on the contract
-        const tx = await escrow.fundStore(dealId);
-        const receipt = await tx.wait();
-        
-        // Get updated deal status
-        const dealInfo = await escrow.getDeal(dealId);
-        const status = dealInfo[5]; // Status is 6th return value (index 5)
-        
-        // Status enum: NONE(0), CREATED(1), CONSUMER_FUNDED(2), STORE_FUNDED(3), RELEASED(4), REFUNDED(5)
-        const statusNames = ['NONE', 'CREATED', 'CONSUMER_FUNDED', 'STORE_FUNDED', 'RELEASED', 'REFUNDED'];
-        const statusName = statusNames[status] || 'UNKNOWN';
-        const fulfilled = status === 4; // RELEASED = 4
-        
-        return res.json({
-          success: true,
-          message: fulfilled 
-            ? 'Store funded and escrow fulfilled! Funds have been released.'
-            : 'Store funded successfully. Waiting for consumer to fund.',
-          confirmation: {
-            storeFunded: true,
-            transactionHash: tx.hash,
-            blockNumber: receipt.blockNumber,
-            gasUsed: receipt.gasUsed.toString()
-          },
-          dealStatus: {
-            status: statusName,
-            statusCode: status,
-            fulfilled: fulfilled
-          }
-        });
-      } catch (error) {
-        console.warn('⚠️  Real funding failed, falling back to simulation:', error.message);
-        simulated = true;
-      }
-    } else {
-      console.warn('⚠️  ESCROW_ADDRESS not set, using simulated funding');
-      simulated = true;
+    // Get the deal
+    const deal = deals.get(dealId);
+    if (!deal) {
+      return res.status(404).json({
+        success: false,
+        error: 'Deal not found. Make sure the dealId is correct.'
+      });
     }
     
-    // Fallback to simulation
-    const txHash = '0x' + crypto.randomBytes(32).toString('hex');
-    const blockNumber = Math.floor(Math.random() * 10000000) + 1000000;
-    const gasUsed = Math.floor(Math.random() * 100000) + 50000;
+    // Verify the caller is the store
+    if (deal.store !== store_wallet.toLowerCase()) {
+      return res.status(403).json({
+        success: false,
+        error: 'Unauthorized. Only the store can fund this side of the deal.'
+      });
+    }
+    
+    // Check deal status
+    if (deal.status === Status.RELEASED) {
+      return res.status(400).json({
+        success: false,
+        error: 'Deal already released. Cannot fund.'
+      });
+    }
+    
+    if (deal.status === Status.REFUNDED) {
+      return res.status(400).json({
+        success: false,
+        error: 'Deal was refunded. Cannot fund.'
+      });
+    }
+    
+    if (deal.storeFunded) {
+      return res.status(400).json({
+        success: false,
+        error: 'Store has already funded this deal.'
+      });
+    }
+    
+    // Fund the store side
+    const txHash = generateTxHash();
+    const block = getNextBlock();
+    const gasUsed = generateGasUsed();
+    
+    deal.storeFunded = true;
+    deal.storeFundedTxHash = txHash;
+    deal.storeFundedBlock = block;
+    
+    // Check if both sides are now funded
+    let fulfilled = false;
+    if (deal.consumerFunded) {
+      // Both funded - release!
+      deal.status = Status.RELEASED;
+      deal.releasedAt = new Date().toISOString();
+      fulfilled = true;
+      console.log('✅ Both sides funded - RELEASED!');
+    } else {
+      deal.status = Status.STORE_FUNDED;
+      console.log('✅ Store funded. Waiting for consumer.');
+    }
     
     return res.json({
       success: true,
-      message: 'Store funded successfully (simulated). Waiting for consumer to fund.',
+      message: fulfilled 
+        ? 'Store funded and escrow fulfilled! Funds have been released.'
+        : 'Store funded successfully. Waiting for consumer to fund.',
       simulated: true,
       confirmation: {
         storeFunded: true,
         transactionHash: txHash,
-        blockNumber: blockNumber,
-        gasUsed: gasUsed.toString()
+        blockNumber: block,
+        gasUsed: gasUsed
       },
       dealStatus: {
-        status: 'STORE_FUNDED',
-        statusCode: 3,
-        fulfilled: false
-      }
+        status: StatusNames[deal.status],
+        statusCode: deal.status,
+        fulfilled: fulfilled,
+        consumerFunded: deal.consumerFunded,
+        storeFunded: deal.storeFunded
+      },
+      payouts: fulfilled ? {
+        store: { address: deal.store, amount: deal.price },
+        influencer: { address: deal.influencer, amount: deal.commission }
+      } : null
     });
     
   } catch (error) {
     console.error('Fund store error:', error);
-    
-    await logError({
-      endpoint: '/api/fund-store',
-      request: req.body,
-      error: {
-        message: error.message,
-        stack: error.stack
-      }
-    });
-    
-    return res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    await logError({ endpoint: '/api/fund-store', request: req.body, error: { message: error.message, stack: error.stack } });
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -930,118 +560,110 @@ app.get('/api/deal-status/:dealId', async (req, res) => {
   try {
     const { dealId } = req.params;
     
-    const ESCROW_ADDRESS = process.env.ESCROW_ADDRESS;
-    let simulated = false;
+    console.log('\n=== Get Deal Status ===');
+    console.log('Deal ID:', dealId);
     
-    // Try real blockchain interaction
-    if (ESCROW_ADDRESS) {
-      try {
-        const escrow = await getEscrowContract();
-        
-        // Get deal information
-        const dealInfo = await escrow.getDeal(dealId);
-        const [consumer, store, influencer, price, commission, status] = dealInfo;
-        
-        // Status enum: NONE(0), CREATED(1), CONSUMER_FUNDED(2), STORE_FUNDED(3), RELEASED(4), REFUNDED(5)
-        const statusNames = ['NONE', 'CREATED', 'CONSUMER_FUNDED', 'STORE_FUNDED', 'RELEASED', 'REFUNDED'];
-        const statusName = statusNames[status] || 'UNKNOWN';
-        const fulfilled = status === 4; // RELEASED = 4
-        
-        return res.json({
-          success: true,
-          dealId: dealId,
-          deal: {
-            consumer: consumer,
-            store: store,
-            influencer: influencer,
-            price: price.toString(),
-            commission: commission.toString()
-          },
-          status: {
-            status: statusName,
-            statusCode: status,
-            fulfilled: fulfilled,
-            consumerFunded: status >= 2 && status !== 5, // CONSUMER_FUNDED or higher (except REFUNDED)
-            storeFunded: status >= 3 && status !== 5, // STORE_FUNDED or higher (except REFUNDED)
-            released: fulfilled
-          }
-        });
-      } catch (error) {
-        console.warn('⚠️  Real status check failed, falling back to simulation:', error.message);
-        simulated = true;
-      }
-    } else {
-      console.warn('⚠️  ESCROW_ADDRESS not set, using simulated status');
-      simulated = true;
+    const deal = deals.get(dealId);
+    if (!deal) {
+      return res.status(404).json({
+        success: false,
+        error: 'Deal not found. Make sure the dealId is correct.'
+      });
     }
     
-    // Fallback to simulation
+    const fulfilled = deal.status === Status.RELEASED;
+    
     return res.json({
       success: true,
       simulated: true,
       dealId: dealId,
       deal: {
-        consumer: '0x0000000000000000000000000000000000000000',
-        store: '0x0000000000000000000000000000000000000000',
-        influencer: '0x0000000000000000000000000000000000000000',
-        price: '0',
-        commission: '0'
+        consumer: deal.consumer,
+        store: deal.store,
+        influencer: deal.influencer,
+        price: deal.price,
+        commission: deal.commission
       },
       status: {
-        status: 'CREATED',
-        statusCode: 1,
-        fulfilled: false,
-        consumerFunded: false,
-        storeFunded: false,
-        released: false
-      }
+        status: StatusNames[deal.status],
+        statusCode: deal.status,
+        fulfilled: fulfilled,
+        consumerFunded: deal.consumerFunded,
+        storeFunded: deal.storeFunded,
+        released: fulfilled
+      },
+      timestamps: {
+        createdAt: deal.createdAt,
+        releasedAt: deal.releasedAt || null
+      },
+      transactions: {
+        created: { txHash: deal.createdTxHash, block: deal.createdBlock },
+        consumerFunded: deal.consumerFunded ? { txHash: deal.consumerFundedTxHash, block: deal.consumerFundedBlock } : null,
+        storeFunded: deal.storeFunded ? { txHash: deal.storeFundedTxHash, block: deal.storeFundedBlock } : null
+      },
+      payouts: fulfilled ? {
+        store: { address: deal.store, amount: deal.price },
+        influencer: { address: deal.influencer, amount: deal.commission }
+      } : null
     });
     
   } catch (error) {
     console.error('Get deal status error:', error);
-    
-    return res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 
 /**
- * Get contract info endpoint
+ * Get contract/simulation info
  */
 app.get('/api/contract-info', async (req, res) => {
-  try {
-    const ESCROW_ADDRESS = process.env.ESCROW_ADDRESS;
-    if (!ESCROW_ADDRESS) {
-      return res.status(400).json({
-        error: 'ESCROW_ADDRESS not set. Deploy contract first.'
-      });
-    }
-    
-    const escrow = await getEscrowContract();
-    
-    res.json({
-      contractAddress: ESCROW_ADDRESS,
-      token: await escrow.token(),
-      owner: await escrow.owner()
-    });
-  } catch (error) {
-    res.status(500).json({
-      error: error.message
-    });
-  }
+  res.json({
+    mode: 'simulation',
+    description: 'In-memory escrow simulation. Deals persist until server restart.',
+    dealsCount: deals.size,
+    currentBlock: blockNumber,
+    statusEnum: StatusNames
+  });
 });
 
-// Start server
+/**
+ * List all deals (for debugging)
+ */
+app.get('/api/deals', async (req, res) => {
+  const allDeals = Array.from(deals.values()).map(deal => ({
+    dealId: deal.dealId,
+    status: StatusNames[deal.status],
+    consumer: deal.consumer,
+    store: deal.store,
+    influencer: deal.influencer,
+    price: deal.price,
+    commission: deal.commission,
+    consumerFunded: deal.consumerFunded,
+    storeFunded: deal.storeFunded,
+    createdAt: deal.createdAt
+  }));
+  
+  res.json({
+    success: true,
+    count: allDeals.length,
+    deals: allDeals
+  });
+});
+
+// =============================================================================
+// START SERVER
+// =============================================================================
+
 app.listen(PORT, () => {
   console.log(`🚀 API Server running on http://localhost:${PORT}`);
-  console.log(`\n📝 Endpoints:`);
-  console.log(`   POST http://localhost:${PORT}/api/create-escrow - Create new escrow deal`);
-  console.log(`   POST http://localhost:${PORT}/api/fund-consumer - Consumer pays price (consumer → store)`);
-  console.log(`   POST http://localhost:${PORT}/api/fund-store - Store pays commission (store → influencer)`);
-  console.log(`   GET  http://localhost:${PORT}/api/deal-status/:dealId - Check deal status and fulfillment`);
-  console.log(`   GET  http://localhost:${PORT}/health - Health check`);
-  console.log(`   GET  http://localhost:${PORT}/api/contract-info - Get contract information`);
-  console.log(`\n⚠️  Make sure ESCROW_ADDRESS is set in .env file for real contracts`);
+  console.log(`\n📝 Mode: IN-MEMORY SIMULATION`);
+  console.log(`   Deals are stored in memory and will reset on server restart.\n`);
+  console.log(`📝 Endpoints:`);
+  console.log(`   POST /api/create-escrow    - Create new escrow deal`);
+  console.log(`   POST /api/fund-consumer    - Consumer pays price (consumer → store)`);
+  console.log(`   POST /api/fund-store       - Store pays commission (store → influencer)`);
+  console.log(`   GET  /api/deal-status/:id  - Check deal status and fulfillment`);
+  console.log(`   GET  /api/deals            - List all deals (debug)`);
+  console.log(`   GET  /api/contract-info    - Get simulation info`);
+  console.log(`   GET  /health               - Health check`);
 });
