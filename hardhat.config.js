@@ -19,5 +19,15 @@ module.exports = {
       url: "http://127.0.0.1:8545",
       chainId: 1337,
     },
+    sepolia: {
+      url: process.env.RPC_URL || "https://rpc.sepolia.org",
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      chainId: 11155111,
+    },
+    mainnet: {
+      url: process.env.RPC_URL || "https://eth.llamarpc.com",
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      chainId: 1,
+    },
   },
 };
