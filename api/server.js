@@ -447,59 +447,90 @@ app.post('/api/create-escrow', async (req, res) => {
       });
     }
     
-    // Step 2: Create the deal on blockchain
+    // Step 2: Create the deal on blockchain (or simulate if not configured)
     console.log('Step 2: Creating deal...');
     
+    let dealResult;
     const ESCROW_ADDRESS = process.env.ESCROW_ADDRESS;
+    
+    // Check if we're in simulation mode (no ESCROW_ADDRESS set)
     if (!ESCROW_ADDRESS) {
-      return res.status(400).json({
-        success: false,
-        error: 'ESCROW_ADDRESS not set. Deploy contract first to use real smart contracts.'
-      });
-    }
-    
-    // Real blockchain interaction
-    const dealResult = await createDeal(
-      price,
-      commission,
-      consumer_wallet,
-      store_wallet,
-      influencer_wallet
-    );
-    
-    if (!dealResult.success) {
-      const error = {
-        message: 'Failed to create deal on blockchain',
-        dealResult: dealResult
+      console.log('⚠️  Simulation mode: No ESCROW_ADDRESS set, simulating contract creation...');
+      
+      // Generate mock/simulated contract data
+      const mockDealId = '0x' + Array.from({ length: 64 }, () => 
+        Math.floor(Math.random() * 16).toString(16)
+      ).join('');
+      const mockTxHash = '0x' + Array.from({ length: 64 }, () => 
+        Math.floor(Math.random() * 16).toString(16)
+      ).join('');
+      const mockBlockNumber = Math.floor(Math.random() * 1000000) + 1000000;
+      const mockGasUsed = Math.floor(Math.random() * 100000) + 50000;
+      
+      dealResult = {
+        success: true,
+        transactionHash: mockTxHash,
+        dealId: mockDealId,
+        receipt: {
+          blockNumber: mockBlockNumber,
+          gasUsed: mockGasUsed.toString()
+        },
+        simulated: true
       };
       
-      await logError({
-        endpoint: '/api/create-escrow',
-        request: req.body,
-        kairoAnalysis: kairoResult,
-        dealCreation: dealResult,
-        error: error
-      });
+      console.log('✅ Simulated deal created');
+      console.log('Deal ID (simulated):', mockDealId);
+      console.log('Transaction (simulated):', mockTxHash);
+    } else {
+      // Real blockchain interaction
+      dealResult = await createDeal(
+        price,
+        commission,
+        consumer_wallet,
+        store_wallet,
+        influencer_wallet
+      );
       
-      return res.status(500).json({
-        success: false,
-        error: error,
-        kairoResult: {
-          decision: kairoResult.decision,
-          status: 'PASSED'
-        },
-        dealResult: dealResult
-      });
+      if (!dealResult.success) {
+        const error = {
+          message: 'Failed to create deal on blockchain',
+          dealResult: dealResult
+        };
+        
+        await logError({
+          endpoint: '/api/create-escrow',
+          request: req.body,
+          kairoAnalysis: kairoResult,
+          dealCreation: dealResult,
+          error: error
+        });
+        
+        return res.status(500).json({
+          success: false,
+          error: error,
+          kairoResult: {
+            decision: kairoResult.decision,
+            status: 'PASSED'
+          },
+          dealResult: dealResult
+        });
+      }
     }
     
     // Step 3: Return success with contract info
     console.log('✅ Deal created successfully!');
+    if (dealResult.simulated) {
+      console.log('ℹ️  Running in simulation mode');
+    }
     console.log('Deal ID:', dealResult.dealId);
     console.log('Transaction:', dealResult.transactionHash);
     
     return res.json({
       success: true,
-      message: 'Escrow created successfully on blockchain',
+      message: dealResult.simulated 
+        ? 'Escrow created successfully (simulated)' 
+        : 'Escrow created successfully on blockchain',
+      simulated: dealResult.simulated || false,
       KairoAPI_buffering: kairoBuffering || false,
       kairoAnalysis: {
         decision: kairoResult.decision,
@@ -510,7 +541,7 @@ app.post('/api/create-escrow', async (req, res) => {
         available: kairoResult.success
       },
       contract: {
-        address: ESCROW_ADDRESS,
+        address: ESCROW_ADDRESS || 'SIMULATED',
         dealId: dealResult.dealId,
         transactionHash: dealResult.transactionHash,
         blockNumber: dealResult.receipt.blockNumber,
@@ -523,7 +554,7 @@ app.post('/api/create-escrow', async (req, res) => {
         store_wallet,
         influencer_wallet
       },
-      nextSteps: {
+      nextSteps: dealResult.simulated ? {} : {
         consumerFund: `POST /api/fund-consumer with {"dealId": "${dealResult.dealId}", "consumer_wallet": "${consumer_wallet}"}`,
         storeFund: `POST /api/fund-store with {"dealId": "${dealResult.dealId}", "store_wallet": "${store_wallet}"}`,
         checkStatus: `GET /api/deal-status/${dealResult.dealId}`
@@ -618,7 +649,8 @@ app.post('/api/fund-consumer', async (req, res) => {
     if (!ESCROW_ADDRESS) {
       return res.status(400).json({
         success: false,
-        error: 'ESCROW_ADDRESS not set. Deploy contract first.'
+        error: 'ESCROW_ADDRESS not set. Funding requires real smart contract deployment.',
+        simulated: true
       });
     }
     
@@ -700,7 +732,8 @@ app.post('/api/fund-store', async (req, res) => {
     if (!ESCROW_ADDRESS) {
       return res.status(400).json({
         success: false,
-        error: 'ESCROW_ADDRESS not set. Deploy contract first.'
+        error: 'ESCROW_ADDRESS not set. Funding requires real smart contract deployment.',
+        simulated: true
       });
     }
     
@@ -768,7 +801,8 @@ app.get('/api/deal-status/:dealId', async (req, res) => {
     if (!ESCROW_ADDRESS) {
       return res.status(400).json({
         success: false,
-        error: 'ESCROW_ADDRESS not set. Deploy contract first.'
+        error: 'ESCROW_ADDRESS not set. Status check requires real smart contract deployment.',
+        simulated: true
       });
     }
     
