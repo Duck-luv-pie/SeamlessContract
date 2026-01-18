@@ -378,9 +378,32 @@ app.post('/api/create-escrow', async (req, res) => {
         // In simulation mode or development, allow proceeding with warning if Kairo unavailable
         console.warn('⚠️  Kairo API unavailable (error or rate limited), proceeding in simulation/development mode');
         kairoResult.decision = 'WARN';
-        kairoResult.decision_reason = kairoResult.error?.includes('403') 
-          ? 'Kairo API rate limited or blocked (403) - proceeding anyway in simulation mode'
-          : 'Kairo API unavailable - proceeding anyway in simulation/development mode';
+        
+        // Determine specific error type
+        let errorType = 'unknown';
+        let errorReason = '';
+        if (kairoResult.error?.includes('403')) {
+          errorType = 'rate_limited';
+          errorReason = 'Kairo API returned 403 - likely rate limited or IP blocked by CloudFront';
+        } else if (kairoResult.error?.includes('401')) {
+          errorType = 'unauthorized';
+          errorReason = 'Kairo API returned 401 - API key may be invalid';
+        } else if (kairoResult.error?.includes('ENOTFOUND') || kairoResult.error?.includes('getaddrinfo')) {
+          errorType = 'network_error';
+          errorReason = 'Cannot resolve Kairo API hostname - DNS/network issue';
+        } else if (kairoResult.error?.includes('ECONNREFUSED') || kairoResult.error?.includes('ECONNRESET')) {
+          errorType = 'connection_refused';
+          errorReason = 'Connection to Kairo API refused - service may be down';
+        } else if (kairoResult.error?.includes('timeout')) {
+          errorType = 'timeout';
+          errorReason = 'Request to Kairo API timed out';
+        } else {
+          errorType = 'api_error';
+          errorReason = kairoResult.error || 'Kairo API error - proceeding anyway in simulation mode';
+        }
+        
+        kairoResult.errorType = errorType;
+        kairoResult.decision_reason = errorReason;
       } else {
         // In production with real contracts, fail if Kairo doesn't work
         const error = {
@@ -517,15 +540,19 @@ app.post('/api/create-escrow', async (req, res) => {
       kairoAnalysis: {
         decision: kairoResult.decision,
         status: kairoResult.decision === 'ALLOW' ? 'PASSED' : 'WARN',
-        findings: kairoResult.response?.findings || []
+        errorType: kairoResult.errorType || null,
+        errorReason: kairoResult.decision_reason || null,
+        findings: kairoResult.response?.findings || [],
+        available: kairoResult.success
       },
       contract: {
+        address: process.env.ESCROW_ADDRESS || 'SIMULATED',
         dealId: dealResult.dealId,
         transactionHash: dealResult.transactionHash,
         blockNumber: dealResult.receipt.blockNumber,
         gasUsed: dealResult.receipt.gasUsed
       },
-      details: {
+      escrowDetails: {
         price: price.toString(),
         commission: commission.toString(),
         consumer_wallet,
