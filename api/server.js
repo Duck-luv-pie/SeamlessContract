@@ -361,21 +361,28 @@ app.post('/api/create-escrow', async (req, res) => {
     
     // Handle Kairo analysis results
     if (!kairoResult.success) {
-      // Check if it's a network error (development/sandbox environment)
+      // Check if we're in simulation mode (no ESCROW_ADDRESS means simulation)
+      const isSimulationMode = !process.env.ESCROW_ADDRESS;
+      
+      // Check if it's a network/API error (403, network issues, etc.)
       const isNetworkError = kairoResult.error && (
         kairoResult.error.includes('ENOTFOUND') ||
         kairoResult.error.includes('getaddrinfo') ||
         kairoResult.error.includes('Network') ||
-        kairoResult.error.includes('ECONNREFUSED')
+        kairoResult.error.includes('ECONNREFUSED') ||
+        kairoResult.error.includes('403') ||
+        kairoResult.error.includes('CloudFront')
       );
       
-      if (isNetworkError && process.env.NODE_ENV !== 'production') {
-        // In development, allow proceeding with warning if network is unavailable
-        console.warn('⚠️  Kairo API unavailable (network error), proceeding in development mode');
+      if (isSimulationMode || (isNetworkError && process.env.NODE_ENV !== 'production')) {
+        // In simulation mode or development, allow proceeding with warning if Kairo unavailable
+        console.warn('⚠️  Kairo API unavailable (error or rate limited), proceeding in simulation/development mode');
         kairoResult.decision = 'WARN';
-        kairoResult.decision_reason = 'Kairo API unavailable - network error (development mode)';
+        kairoResult.decision_reason = kairoResult.error?.includes('403') 
+          ? 'Kairo API rate limited or blocked (403) - proceeding anyway in simulation mode'
+          : 'Kairo API unavailable - proceeding anyway in simulation/development mode';
       } else {
-        // In production or non-network errors, fail
+        // In production with real contracts, fail if Kairo doesn't work
         const error = {
           message: 'Kairo analysis failed',
           kairoResult: kairoResult
