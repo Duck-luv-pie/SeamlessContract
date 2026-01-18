@@ -46,6 +46,11 @@ let blockNumber = 1000000;
 const TOKEN_DECIMALS = 6;
 const TOKEN_SYMBOL = 'USDC';
 
+// Default starting balances (in base units - 6 decimals for USDC)
+// Consumer gets 100 USDC, Store gets 50 USDC
+const DEFAULT_CONSUMER_BALANCE = 100000000n; // 100.000000 USDC
+const DEFAULT_STORE_BALANCE = 50000000n;     // 50.000000 USDC
+
 // =============================================================================
 // HELPER FUNCTIONS
 // =============================================================================
@@ -112,6 +117,17 @@ function formatBalance(amount) {
   const intPart = amountStr.slice(0, -TOKEN_DECIMALS) || '0';
   const decPart = amountStr.slice(-TOKEN_DECIMALS);
   return `${intPart}.${decPart}`;
+}
+
+// Initialize wallet with default balance if it doesn't exist
+function initializeWalletIfNeeded(walletAddress, defaultBalance) {
+  const addr = walletAddress.toLowerCase();
+  if (!walletBalances.has(addr)) {
+    walletBalances.set(addr, defaultBalance);
+    console.log(`💰 Initialized wallet ${addr} with ${formatBalance(defaultBalance)} ${TOKEN_SYMBOL}`);
+    return true;
+  }
+  return false;
 }
 
 // =============================================================================
@@ -438,6 +454,13 @@ app.post('/api/create-escrow', async (req, res) => {
     
     // Create the deal
     console.log('Step 2: Creating deal in simulation...');
+    
+    // Initialize wallets with default balances if they don't exist
+    const consumerInitialized = initializeWalletIfNeeded(consumer_wallet, DEFAULT_CONSUMER_BALANCE);
+    const storeInitialized = initializeWalletIfNeeded(store_wallet, DEFAULT_STORE_BALANCE);
+    // Influencer starts with 0 (they only receive, never pay)
+    initializeWalletIfNeeded(influencer_wallet, 0n);
+    
     const dealId = generateDealId();
     const txHash = generateTxHash();
     const block = getNextBlock();
